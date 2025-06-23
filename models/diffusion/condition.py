@@ -1,18 +1,13 @@
-import math
 import torch
-import torch.nn.functional as F
-from torch import nn, einsum 
+from torch import nn
 
-from einops import rearrange, repeat, reduce
+from einops import repeat
 from einops.layers.torch import Rearrange
-from einops_exts import rearrange_many, repeat_many, check_shape
 
 from rotary_embedding_torch import RotaryEmbedding
 
-from utils.model_utils import * 
-from input_encoder.conv_pointlite import ConvPointnet
+from utils.model_utils import *
 
-from random import sample
 
 class CausalTransformer(nn.Module):
     def __init__(
@@ -120,98 +115,58 @@ class CausalTransformer(nn.Module):
 
         out = self.norm(x)
         return self.project_out(out)
+    
 
-class DiffusionNet(nn.Module):
-
+class ConditionNet(nn.Module):
     def __init__(
         self,
         dim,
         dim_in_out=None,
         num_timesteps = None,
         num_time_embeds = 1,
-        cond = None,
+        cond = False,  # conditional
         **kwargs
     ):
         super().__init__()
         self.num_time_embeds = num_time_embeds
         self.dim = dim
-        self.cond = cond
+        self.cond = cond  # MultiModalEncoder
         self.cross_attn = kwargs.get('cross_attn', False)
-        self.cond_dropout = kwargs.get('cond_dropout', False)
-        self.point_feature_dim = kwargs.get('point_feature_dim', dim)
-
         self.dim_in_out = default(dim_in_out, dim)
-        #print("dim, in out, point feature dim: ", dim, dim_in_out, self.point_feature_dim)
-        #print("cond dropout: ", self.cond_dropout)
 
+        # timestep embedding
         self.to_time_embeds = nn.Sequential(
-            nn.Embedding(num_timesteps, self.dim_in_out * num_time_embeds) if exists(num_timesteps) else nn.Sequential(SinusoidalPosEmb(self.dim_in_out), MLP(self.dim_in_out, self.dim_in_out * num_time_embeds)), # also offer a continuous version of timestep embeddings, with a 2 layer MLP
+            nn.Embedding(num_timesteps, self.dim_in_out * num_time_embeds) if exists(num_timesteps) 
+            else nn.Sequential(SinusoidalPosEmb(self.dim_in_out), MLP(self.dim_in_out, self.dim_in_out * num_time_embeds)),
             Rearrange('b (n d) -> b n d', n = num_time_embeds)
         )
 
-        # last input to the transformer: "a final embedding whose output from the Transformer is used to predicted the unnoised CLIP image embedding"
+        # learned query: learnable token
         self.learned_query = nn.Parameter(torch.randn(self.dim_in_out))
         self.causal_transformer = CausalTransformer(dim = dim, dim_in_out=self.dim_in_out, **kwargs)
 
-        if cond:
-            # output dim of pointnet needs to match model dim; unless add additional linear layer
-            self.pointnet = ConvPointnet(c_dim=self.point_feature_dim) 
+    def forward(self, data, diffusion_timesteps, pass_cond=-1):
+        # data: condition data, [B, fusion_out_points, fusion_out_channels]
+        # diffusion_timesteps: [B], timestep for each sample
+        # pass_cond: classifier-free guidance
+        cond_feature = data  # [B, fusion_out_points, fusion_out_channels]
 
+        batch = cond_feature.shape[0]
+        time_embed = self.to_time_embeds(diffusion_timesteps)  # [B, num_time_embeds, dim_in_out]
+        # if conditional got time information, can transform it directly; otherwise, need to concatenate other information to construct tokens
 
-    def forward(
-        self,
-        data, 
-        diffusion_timesteps,
-        pass_cond=-1, # default -1, depends on prob; but pass as argument during sampling
-
-    ):
-
-        if self.cond:
-            assert type(data) is tuple
-            data, cond = data # adding noise to cond_feature so doing this in diffusion.py
-
-            #print("data, cond shape: ", data.shape, cond.shape) # B, dim_in_out; B, N, 3
-            #print("pass cond: ", pass_cond)
-            if self.cond_dropout:
-                # classifier-free guidance: 20% unconditional 
-                prob = torch.randint(low=0, high=10, size=(1,))
-                percentage = 8
-                if prob < percentage or pass_cond==0:
-                    cond_feature = torch.zeros( (cond.shape[0], cond.shape[1], self.point_feature_dim), device=data.device )
-                    #print("zeros shape: ", cond_feature.shape) 
-                elif prob >= percentage or pass_cond==1:
-                    cond_feature = self.pointnet(cond, cond)
-                    #print("cond shape: ", cond_feature.shape)
-            else:
-                cond_feature = self.pointnet(cond, cond)
-
-            
-        batch, dim, device, dtype = *data.shape, data.device, data.dtype
-
-        num_time_embeds = self.num_time_embeds
-        time_embed = self.to_time_embeds(diffusion_timesteps)
-
-        data = data.unsqueeze(1)
-
+        # concatenate time embedding and condition feature, learned query as the last token
+        # cond_feature: [B, fusion_out_points, fusion_out_channels] -> [B, 1, dim_in_out]
+        # consume condition feature: L_cond, time embed: num_time_embeds, learned query: 1
         learned_queries = repeat(self.learned_query, 'd -> b 1 d', b = batch)
-
-        model_inputs = [time_embed, data, learned_queries]
-
-        if self.cond and not self.cross_attn:
-            model_inputs.insert(0, cond_feature) # cond_feature defined in first loop above 
-        
-        tokens = torch.cat(model_inputs, dim = 1) # (b, 3/4, d); batch and d=512 same across the model_inputs 
-        #print("tokens shape: ", tokens.shape)
+        tokens = torch.cat([time_embed, cond_feature, learned_queries], dim=1)  # [B, num_time_embeds + L_cond + 1, dim_in_out]
 
         if self.cross_attn:
-            cond_feature = None if not self.cond else cond_feature
-            #print("tokens shape: ", tokens.shape, cond_feature.shape)
+            #  cross attention, push tokens and context through the transformer
             tokens = self.causal_transformer(tokens, context=cond_feature)
         else:
             tokens = self.causal_transformer(tokens)
 
-        # get learned query, which should predict the sdf layer embedding (per DDPM timestep)
-        pred = tokens[..., -1, :]
-
+        # last tokens is the prediction
+        pred = tokens[:, -1, :]  # [B, dim_in_out]
         return pred
-
