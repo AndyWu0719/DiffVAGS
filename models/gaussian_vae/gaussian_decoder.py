@@ -279,4 +279,5 @@ class OccDecoder(nn.Module):
             out = nn.Tanh()(out)
 
         out = torch.abs(out)
-        return out  # GauPF
+        
+        return out  # GauPF    

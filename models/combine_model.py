@@ -10,6 +10,10 @@ from models.gaussian_vae.gaussian_encoder import GaussianEncoder
 from models.diffusion.diff_model import DiffusionModel
 from models.diffusion.condition_net import DiffusionNet
 
+from models.visual_alignment.g2f import GaussianToFeature
+from models.visual_alignment.foundation_models import aux_foundation_model
+from models.visual_alignment.visual_alignment import VisualAlignmentLoss
+
 class CombinedModel(pl.LightningModule):
     def __init__(self, specs):
         super().__init__()
@@ -18,17 +22,46 @@ class CombinedModel(pl.LightningModule):
 
         print(f"Initializing CombinedModel for task: {self.task}")
 
+        va_specs = self.specs.get("VisualAlignmentSpecs", {})
+        self.enable_visual_alignment = va_specs.get("enable", False)
+
         if self.task in ('combined', 'modulation'):
             self.gaussian_model = GaussianModel(specs=specs)
-            feature_dim = specs.get("GaussianModelSpecs", {}).get("latent_dim", 256)
+            
+            model_specs = specs.get("GaussianModelSpecs", {})
+            feature_dim = model_specs.get("latent_dim", 256)
             modulation_dim = feature_dim * 3
-            latent_std = specs.get("GaussianModelSpecs", {}).get("latent_std", 0.25)
-            hidden_dims = [modulation_dim, modulation_dim, modulation_dim, modulation_dim, modulation_dim]
-            self.vae_model = GaussianEncoder(in_channels=feature_dim*3, latent_dim=modulation_dim, hidden_dims=hidden_dims, kl_std=latent_std, 
-                                             enable_vavae=specs.get("GaussianModelSpecs", {}).get("enable_vavae", False))
-            self.enable_vavae = specs.get("GaussianModelSpecs", {}).get("enable_vavae", False)
+            latent_std = self.specs.get("latent_std", 0.25) # 从顶层读取
+            hidden_dims = [modulation_dim] * 5
+            self.vae_model = GaussianEncoder(in_channels=feature_dim*3, latent_dim=modulation_dim, hidden_dims=hidden_dims, kl_std=latent_std)
 
-            print(f"{'VAVAE' if self.enable_vavae else 'Standard VAE'} mode")
+            print(f"{'VA' if self.enable_visual_alignment else 'Standard'} mode")
+
+            # --- 2. 初始化视觉对齐模块 (如果配置中启用) ---
+            if self.enable_visual_alignment:
+                print("Visual Alignment is ENABLED. Initializing modules...")
+                
+                # 初始化 G2F 模块 (用于从高斯参数预测特征)
+                self.g2f_module = GaussianToFeature(
+                    checkpoint_path=model_specs["g2f_checkpoint_path"],
+                    device=self.device
+                )
+                
+                # 初始化 2D VFM (用于从真实图像提取监督信号)，它会自动加载 adapter 的权重
+                self.feature_extractor = aux_foundation_model(
+                    type='dinov2',
+                    adapter_weights_path=model_specs["adapter_weights_path"]
+                )
+                
+                # 初始化 VF Loss 计算模块
+                self.vf_loss_criterion = VisualAlignmentLoss(
+                    cosine_weight=model_specs.get("cosine_weight", 0.5),
+                    distance_weight=model_specs.get("distance_weight", 0.5)
+                )
+                
+                # 获取 VF Loss 在总损失中的权重
+                self.vf_loss_weight = model_specs.get("vf_loss_weight", 1.0)
+                print("✅ Visual Alignment modules initialized successfully.")
 
         if self.task in ('combined', 'diffusion'):
             if "diffusion_specs" in specs and "diffusion_model_specs" in specs:
@@ -82,17 +115,7 @@ class CombinedModel(pl.LightningModule):
         plane_features = self.gaussian_model.pointnet.get_plane_features(gs)
         original_features = torch.cat(plane_features, dim=1)
 
-        if self.enable_vavae:
-            multiview_images = x.get('multiview_images', None)
-            has_multiview = x.get('has_multiview_data', False)
-            
-            if has_multiview and multiview_images is not None:
-                out = self.vae_model(original_features, multiview_images)
-            else:
-                print("Warning: VAVAE mode but no multiview images in batch")
-                return None
-        else:
-            out = self.vae_model(original_features)
+        out = self.vae_model(original_features)
 
         reconstructed_plane_feature, latent = out[0], out[1]
 
@@ -118,28 +141,40 @@ class CombinedModel(pl.LightningModule):
         occ_loss = F.l1_loss(pred_occ.squeeze(-1), occ.squeeze(-1), reduction='none')
         occ_loss = reduce(occ_loss, 'b ... -> b (...)', 'mean').mean()
 
+        # (D) 将所有损失相加
         total_loss = color_loss + vae_loss + occ_loss + scale_loss + rotation_loss
 
+        # (E) 记录所有损失用于监控
         loss_dict = {
             "loss": total_loss,
             "color": color_loss,
-            "vae": vae_loss,
+            "vae_total": vae_loss,
             "occ": occ_loss,
             "scale": scale_loss,
-            "rotation": rotation_loss
+            "rotation": rotation_loss,
+            "kld": vae_loss_dict.get('KLD_total', 0)
         }
         
-        if self.enable_vavae:
+        # 记录 VF Loss 的详细分解
+        if self.enable_visual_alignment:
+            # 计算 VF Loss
+            predicted_view_features = self.g2f_module(gaussian_xyz, pred_color, pred_gs, pred_occ)
+            target_view_features = {
+                view: self.feature_extractor.extract_global_features(img.unsqueeze(0) if img.dim() == 3 else img)
+                for view, img in x['multiview_images'].items()
+            }
+            vf_loss_details = self.vf_loss_criterion(predicted_view_features, target_view_features)
+            vf_loss = vf_loss_details.get('vf_loss', torch.tensor(0.0, device=self.device))
+            
+            # 将 VF Loss 添加到总损失
+            total_loss += self.vf_loss_weight * vf_loss
+            loss_dict['loss'] = total_loss # 更新总损失
+
+            # 记录所有视觉对齐相关的损失
             loss_dict.update({
-                "kld_geo": vae_loss_dict.get('KLD_geo', torch.tensor(0.0)),
-                "kld_sem": vae_loss_dict.get('KLD_sem', torch.tensor(0.0)),
-                "kld_total": vae_loss_dict.get('KLD_total', torch.tensor(0.0)),
-                "vfloss": vae_loss_dict.get('VF_Loss', torch.tensor(0.0)),
-                "reconstruction": vae_loss_dict.get('Reconstruction_Loss', torch.tensor(0.0)),
-                "vf_pointwise_loss": vae_loss_dict.get('VF_Pointwise_Loss', torch.tensor(0.0)),
-                "vf_distance_loss": vae_loss_dict.get('VF_Distance_Loss', torch.tensor(0.0)),
-                "base_vae_loss": vae_loss_dict.get('Base_VAE_Loss', torch.tensor(0.0)),
-                "interaction_strength": vae_loss_dict.get('Interaction_Strength', torch.tensor(0.5)),
+                "vf_loss": vf_loss,
+                "vf_cosine": vf_loss_details.get('avg_cosine_loss', 0),
+                "vf_distance": vf_loss_details.get('avg_distance_loss', 0),
             })
 
         self.log_dict(loss_dict, prog_bar=True, enable_graph=False)

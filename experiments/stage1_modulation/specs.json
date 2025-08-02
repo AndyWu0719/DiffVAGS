@@ -1,0 +1,39 @@
+{
+    "Description": "LightDiffGS: Stage 1 - Modulation Training with VAVAE",
+    
+    "training_task": "modulation",
+    "Data_path": "/media/guest1/WD6TB/WD6TB/Andy/Datasets/lightdiffgsdata/03001627/training_data",
+    
+    "num_epochs": 1000,
+    "log_freq": 100,
+    "kld_weight": 1e-5,
+    
+    "learning_rates": {
+        "sdf_lr": 1e-4
+    },
+    
+    "GaussianModelSpecs": {
+        "hidden_dim" : 512,
+        "latent_dim" : 256,
+        "pn_hidden_dim" : 128,
+        "num_layers" : 9
+    },
+
+    "VisualAlignmentSpecs": {
+        "enable": true,
+        "vf_loss_weight": 0.1,
+        "cosine_weight": 0.5,
+        "distance_weight": 0.5,
+        "views_to_load": ["front.png", "side.png", "top.png"],
+        "image_size": 224,
+        "images_folder": "images",
+        "g2f_checkpoint_path": "/path/to/your/g2f_net/best_model.pth",
+        "adapter_weights_path": "/path/to/your/g2f_net/adapter_weights.pth"
+    },
+    
+    "TrainerSpecs": {
+        "batch_size": 1,
+        "num_workers": 1,
+        "precision": 32
+    }
+}

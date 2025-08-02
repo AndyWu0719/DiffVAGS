@@ -1,0 +1,7 @@
+# filepath: /home/andywu/Documents/dongjun/DiffVAGS/.gitignore
+
+# 操作系统生成的文件
+.vscode
+
+# 编译输出
+generate

@@ -10,7 +10,7 @@ from einops_exts import rearrange_many, repeat_many, check_shape
 from rotary_embedding_torch import RotaryEmbedding
 
 from utils.model_utils import * 
-from input_encoder.conv_pointlite import ConvPointnet
+from models.gaussian_vae.conv_pointlite import ConvPointnet
 
 from random import sample
 

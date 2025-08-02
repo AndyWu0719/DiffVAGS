@@ -15,7 +15,7 @@ def get_dinov2_encoder():
     """
     Load the DINOv2 pretrained ViT-L encoder from the timm library.
     """
-    model = timm.create_model("hf-hub:timm/vit_large_patch14_dinov2.lvd142m", pretrained=True, dynamic_img_size=True)
+    model = timm.create_model("hf-hub:timm/vit_small_patch14_dinov2.lvd142m", pretrained=True, dynamic_img_size=True)
     model.requires_grad_(False)
     return model
 
@@ -27,23 +27,42 @@ def create_foundation_model(
     if type == 'mae':
         return get_mae_encoder(), 1024
     elif type == 'dinov2':
-        return get_dinov2_encoder(), 1024
+        return get_dinov2_encoder(), 384
 
 class aux_foundation_model(nn.Module):
     """
     Load the foundation model and forward the input image to get 
     the feature maps.
     """
-    def __init__(self, type):
+    def __init__(self, type, adapter_weights_path=None):
         super().__init__()
         self.model, feature_dim = create_foundation_model(type)
         self.type = type
         self.feature_dim = feature_dim
+        self.adapter = None
         
         if type == 'mae':
             self.patch_size = 16
             self.input_size = 224
         elif type == 'dinov2':
+            # 这个 adapter 的输入和输出维度都是 self.feature_dim (384)
+            self.feature_adapter = nn.Sequential(
+                nn.Linear(self.feature_dim, self.feature_dim),
+                nn.ReLU(),
+                nn.Linear(self.feature_dim, self.feature_dim)
+            )
+            if adapter_weights_path:
+                try:
+                    adapter_weights = torch.load(adapter_weights_path, map_location='cpu')
+                    self.feature_adapter.load_state_dict(adapter_weights)
+                    print("✅ Adapter 权重加载成功！")
+                except Exception as e:
+                    print(f"❌ 警告: 加载 Adapter 权重失败: {e}。")
+            
+            self.feature_adapter.to(self.model.device)
+            self.feature_adapter.eval()
+            for param in self.feature_adapter.parameters():
+                param.requires_grad = False
             self.patch_size = 14
             self.input_size = 224
 
@@ -111,8 +130,14 @@ class aux_foundation_model(nn.Module):
             
             if self.type in ['mae', 'dinov2']:
                 global_features = features[:, 0, :]  # [B, feature_dim]
-            else:
+                if hasattr(self, 'feature_adapter') and self.feature_adapter is not None:
+                    # adapter 输入 384, 输出 384
+                    final_feature = self.feature_adapter(global_features)
+                    return final_feature
+                else:
+                    return global_features
+            '''else:
                 patch_features = features[:, 1:, :]
                 global_features = torch.mean(patch_features, dim=1)  # [B, feature_dim]
             
-            return global_features
+            return global_features'''

@@ -42,6 +42,7 @@ class ModulationLoader(torch.utils.data.Dataset):
         length = len(os.listdir(data_source))
         for idx in range(length):
             instance_filename = os.path.join(data_source, str(idx), f_name)
-            files.append( torch.from_numpy(np.loadtxt(instance_filename)).float() )
+            latent = torch.from_numpy(np.loadtxt(instance_filename)).float()
+            files.append(latent)
         return files
     

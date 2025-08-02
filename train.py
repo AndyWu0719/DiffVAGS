@@ -21,34 +21,43 @@ def train():
     
     if task == 'diffusion':
         train_dataset = ModulationLoader(data_path, gs_path=specs.get("gs_path", None))
-        enable_vavae = specs.get("enable_vavae", False)
+        model_type = "diffusion"
     else:
-        gaussian_specs = specs.get("GaussianModelSpecs", {})
-        enable_vavae = gaussian_specs.get("enable_vavae", False)
+        va_specs = specs.get("VisualAlignmentSpecs", {})
+        enable_visual_alignment = va_specs.get("enable", False)
         
-        if enable_vavae:
-            multiview_specs = gaussian_specs.get("multiview", {})
+        if enable_visual_alignment:
+            print("Visual Alignment mode enabled. Using MultiViewGaussianLoader.")
             train_dataset = MultiViewGaussianLoader(
                 data_root=data_path,
-                multiview_specs=multiview_specs,
-                enable_multiview=True
+                multiview_specs=va_specs # 直接传递整个VA配置节
             )
+            model_type = "visual_alignment"
         else:
+            print("Standard mode enabled. Using GaussianLoader.")
             train_dataset = GaussianLoader(data_path)
+            model_type = "standard_vae"
     
     print(f"Dataset size: {len(train_dataset)}")
+
+    trainer_specs = specs.get("TrainerSpecs", {})
+
+    batch_size = args.batch_size if args.batch_size is not None else trainer_specs.get("batch_size", 1)
+    num_workers = args.workers if args.workers is not None else trainer_specs.get("num_workers", 1)
+    precision = args.precision if args.precision is not None else trainer_specs.get("precision", 32)
+
+    print(f"Effective training params: batch_size={batch_size}, workers={num_workers}, precision={precision}")
     
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
-        batch_size=args.batch_size, 
-        num_workers=args.workers,
+        batch_size=batch_size, 
+        num_workers=num_workers,
         drop_last=True, 
         shuffle=True, 
         pin_memory=True, 
-        persistent_workers=True if args.workers > 0 else False
+        persistent_workers=True if num_workers > 0 else False
     )
 
-    model_type = "vavae" if enable_vavae else "standard_vae"
     save_dir = os.path.join(args.exp_dir, model_type)
     os.makedirs(save_dir, exist_ok=True)
 
@@ -102,7 +111,8 @@ def train():
     trainer = pl.Trainer(
         accelerator='gpu', 
         devices=-1, 
-        precision=32,
+        strategy='ddp',
+        precision=precision,
         max_epochs=specs["num_epochs"], 
         callbacks=callbacks, 
         log_every_n_steps=1,
@@ -124,8 +134,9 @@ if __name__ == "__main__":
         "--resume", "-r", default=None,
         help="Resume training: Int, 'last' or 'finetune'"
     )
-    arg_parser.add_argument("--batch_size", "-b", default=1, type=int)
-    arg_parser.add_argument("--workers", "-w", default=1, type=int)
+    arg_parser.add_argument("--batch_size", "-b", default=None, type=int, help="Override batch_size in specs.json")
+    arg_parser.add_argument("--workers", "-w", default=None, type=int, help="Override num_workers in specs.json")
+    arg_parser.add_argument("--precision", "-p", default=None, type=int, help="Override precision in specs.json")
 
     args = arg_parser.parse_args()
     

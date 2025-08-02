@@ -41,62 +41,40 @@ class TestDataLoader:
 
 @torch.no_grad()
 def test_modulations():
-    print("=== Testing Modulations ===")
-    
     vavae_specs = specs.get("VAVAESpecs", {})
     enable_vavae = vavae_specs.get("enable", False)
     
-    test_dataset = TestDataLoader(
-        data_root=specs["Data_path"], 
-        enable_vavae=enable_vavae,
-        multiview_specs=vavae_specs.get("multiview", {}) if enable_vavae else None
-    )
+    # 根据VAVAE状态选择不同的数据加载器
+    if enable_vavae:
+        test_dataset = MultiViewGaussianLoader(
+            data_root=specs["Data_path"],
+            multiview_specs=vavae_specs.get("multiview", {}),
+            enable_multiview=True
+        )
+        image_handler = MultiViewImageHandler(vavae_specs.get("multiview", {}))
+    else:
+        test_dataset = GaussianLoader(specs["Data_path"])
     
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=1, num_workers=4)
-    
-    ckpt_name = f"{args.resume}.ckpt" if args.resume == 'last' else f"epoch={args.resume}.ckpt"
-    resume_path = os.path.join(args.exp_dir, ckpt_name)
-    
-    model = CombinedModel.load_from_checkpoint(resume_path, specs=specs).cuda().eval()
+
+    ckpt = "{}.ckpt".format(args.resume) if args.resume=='last' else "epoch={}.ckpt".format(args.resume)
+    resume = os.path.join(args.exp_dir, ckpt)
+    model = CombinedModel.load_from_checkpoint(resume, specs=specs).cuda().eval()
     
     output_suffix = "vavae" if enable_vavae else "standard_vae"
     latent_dir = os.path.join(args.exp_dir, output_suffix, "modulations")
     os.makedirs(latent_dir, exist_ok=True)
-    
-    if enable_vavae:
-        image_handler = MultiViewImageHandler(vavae_specs.get("multiview", {}))
-    
+
     with tqdm(test_dataloader) as pbar:
         for idx, data in enumerate(pbar):
-            pbar.set_description(f"Extracting latents: {idx}/{len(test_dataloader)}")
-            
+            pbar.set_description("Files evaluated: {}/{}".format(idx, len(test_dataloader)))
             gs = data['gaussians'].cuda()
             plane_features = model.gaussian_model.pointnet.get_plane_features(gs)
             original_features = torch.cat(plane_features, dim=1)
             
-            if enable_vavae:
-                if data.get('has_multiview_data', False):
-                    multiview_images = data['multiview_images'].cuda()
-                    out = model.vae_model(original_features, multiview_images)
-                    latent = torch.cat([out[6], out[7]], dim=-1)  # z_geo + z_sem
-                else:
-                    data_path = data.get('data_path', [None])[0]
-                    if data_path:
-                        multiview_images = image_handler.load_multiview_images(data_path)
-                        if multiview_images is not None:
-                            multiview_images = multiview_images.unsqueeze(0).cuda()
-                            out = model.vae_model(original_features, multiview_images)
-                            latent = torch.cat([out[6], out[7]], dim=-1)
-                        else:
-                            print(f"Skipping sample {idx}: no multiview images")
-                            continue
-                    else:
-                        continue
-            else:
-                out = model.vae_model(original_features)
-                latent = out[4]  # z
+            latent = model.vae_model.get_latent(original_features)
             
-            outdir = os.path.join(latent_dir, str(idx))
+            outdir = os.path.join(latent_dir, "{}".format(idx))
             os.makedirs(outdir, exist_ok=True)
             np.savetxt(os.path.join(outdir, "latent.txt"), latent.cpu().numpy())
     

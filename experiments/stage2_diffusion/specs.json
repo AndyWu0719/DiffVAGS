@@ -1,0 +1,34 @@
+{
+    "Description": "LightDiffGS: Stage 2 - Diffusion Model Training",
+    
+    "training_task": "diffusion",
+    "Data_path": "/home/andywu/Documents/dongjun/NewGSDiffusion/experiments/stage1_modulation/vavae/modulations",
+    
+    "num_epochs": 50001,
+    "log_freq": 2500,
+    "enable_vavae": true,
+    
+    "learning_rates": {
+        "diff_lr": 1e-5
+    },
+    
+    "diffusion_specs": {
+        "timesteps": 1000,
+        "objective": "pred_x0",
+        "beta_schedule": "cosine"
+    },
+    
+    "diffusion_model_specs": {
+        "dim": 768,
+        "dim_in_out" : 768,
+        "depth": 4,
+        "ff_dropout": 0.3,
+        "cond": false
+    },
+    
+    "TrainerSpecs": {
+        "batch_size": 1,
+        "num_workers": 1,
+        "precision": 32
+    }
+  }

@@ -10,7 +10,7 @@ import math
 from einops import rearrange, reduce
 from models.gaussian_vae.gaussian_encoder import GaussianEncoder
 from models.gaussian_vae.gaussian_decoder import ColorDecoder, OccDecoder, TransformDecoder
-from conv_pointlite import ConvPointnet
+from models.gaussian_vae.conv_pointlite import ConvPointnet
 
 class GaussianModel(pl.LightningModule):
 
@@ -25,14 +25,14 @@ class GaussianModel(pl.LightningModule):
         self.tanh_act = model_specs.get("tanh_act", False)
         self.pn_hidden = model_specs.get("pn_hidden_dim", self.latent_dim)
 
-        self.enable_vavae = model_specs.get("enable_vavae", False)
-        self.foundation_model_type = model_specs.get("foundation_model_type", "dinov2")
+        self.enable_visual_alignment = model_specs.get("enable_visual_alignment", False)
+        self.foundation_model_type = model_specs.get("VFM_model", "dinov2")
 
-        if self.enable_vavae:
-            print(f"Initializing VAVAE mode with {self.foundation_model_type.upper()}")
+        if self.enable_visual_alignment:
+            print(f"Initializing VA mode with {self.foundation_model_type.upper()}")
             assert self.foundation_model_type in ['dinov2', 'mae'], f"Unsupported foundation model: {self.foundation_model_type}"
         else:
-            print("Initializing standard VAE mode")
+            print("Initializing standard mode")
 
         self.pointnet = ConvPointnet(
             c_dim=self.latent_dim,
@@ -75,7 +75,7 @@ class GaussianModel(pl.LightningModule):
         return pred_occ # [B, num_points] 
     
     def get_model_type(self):
-        if self.enable_vavae:
-            return f"VAVAE_{self.foundation_model_type.upper()}"
+        if self.enable_visual_alignment:
+            return f"VA_{self.foundation_model_type.upper()}"
         else:
             return "VAE"
