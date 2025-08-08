@@ -31,37 +31,31 @@ class CombinedModel(pl.LightningModule):
             model_specs = specs.get("GaussianModelSpecs", {})
             feature_dim = model_specs.get("latent_dim", 256)
             modulation_dim = feature_dim * 3
-            latent_std = self.specs.get("latent_std", 0.25) # 从顶层读取
+            latent_std = self.specs.get("latent_std", 0.25)
             hidden_dims = [modulation_dim] * 5
             self.vae_model = GaussianEncoder(in_channels=feature_dim*3, latent_dim=modulation_dim, hidden_dims=hidden_dims, kl_std=latent_std)
 
             print(f"{'VA' if self.enable_visual_alignment else 'Standard'} mode")
 
-            # --- 2. 初始化视觉对齐模块 (如果配置中启用) ---
             if self.enable_visual_alignment:
                 print("Visual Alignment is ENABLED. Initializing modules...")
                 
-                # 初始化 G2F 模块 (用于从高斯参数预测特征)
                 self.g2f_module = GaussianToFeature(
-                    checkpoint_path=model_specs["g2f_checkpoint_path"],
+                    checkpoint_path=va_specs["g2f_checkpoint_path"],
                     device=self.device
                 )
                 
-                # 初始化 2D VFM (用于从真实图像提取监督信号)，它会自动加载 adapter 的权重
                 self.feature_extractor = aux_foundation_model(
-                    type='dinov2',
-                    adapter_weights_path=model_specs["adapter_weights_path"]
+                    type='dinov2'
                 )
                 
-                # 初始化 VF Loss 计算模块
                 self.vf_loss_criterion = VisualAlignmentLoss(
-                    cosine_weight=model_specs.get("cosine_weight", 0.5),
-                    distance_weight=model_specs.get("distance_weight", 0.5)
+                    cosine_weight=va_specs.get("cosine_weight", 0.5),
+                    distance_weight=va_specs.get("distance_weight", 0.5)
                 )
                 
-                # 获取 VF Loss 在总损失中的权重
-                self.vf_loss_weight = model_specs.get("vf_loss_weight", 1.0)
-                print("✅ Visual Alignment modules initialized successfully.")
+                self.vf_loss_weight = va_specs.get("vf_loss_weight", 1.0)
+                print("Visual Alignment modules initialized successfully.")
 
         if self.task in ('combined', 'diffusion'):
             if "diffusion_specs" in specs and "diffusion_model_specs" in specs:
@@ -117,17 +111,14 @@ class CombinedModel(pl.LightningModule):
 
         out = self.vae_model(original_features)
 
+        vae_loss_dict = self.vae_model.loss_function(*out, M_N=self.specs["kld_weight"], global_step=self.global_step)
+        vae_loss = vae_loss_dict['VAEloss']
+        kld_unweighted = vae_loss_dict.get('kld_unweighted')
+
         reconstructed_plane_feature, latent = out[0], out[1]
 
         pred_color, pred_gs = self.gaussian_model.forward_with_plane_features(reconstructed_plane_feature, gaussian_xyz)
         pred_occ = self.gaussian_model.forward_with_plane_features_occ(reconstructed_plane_feature, occ_xyz)
-        
-        try:
-            vae_loss_dict = self.vae_model.loss_function(*out, M_N=self.specs["kld_weight"])
-            vae_loss = vae_loss_dict['VAEloss']
-        except Exception as e:
-            print(f"VAE loss failed at epoch {self.current_epoch}: {e}")
-            return None
 
         color_loss = F.l1_loss(pred_color[:,:,0:48], gt[:,:,0:48], reduction='none')
         color_loss = reduce(color_loss, 'b ... -> b (...)', 'mean').mean()
@@ -141,10 +132,8 @@ class CombinedModel(pl.LightningModule):
         occ_loss = F.l1_loss(pred_occ.squeeze(-1), occ.squeeze(-1), reduction='none')
         occ_loss = reduce(occ_loss, 'b ... -> b (...)', 'mean').mean()
 
-        # (D) 将所有损失相加
         total_loss = color_loss + vae_loss + occ_loss + scale_loss + rotation_loss
 
-        # (E) 记录所有损失用于监控
         loss_dict = {
             "loss": total_loss,
             "color": color_loss,
@@ -152,25 +141,36 @@ class CombinedModel(pl.LightningModule):
             "occ": occ_loss,
             "scale": scale_loss,
             "rotation": rotation_loss,
-            "kld": vae_loss_dict.get('KLD_total', 0)
+            "kld": kld_unweighted
         }
         
-        # 记录 VF Loss 的详细分解
         if self.enable_visual_alignment:
-            # 计算 VF Loss
             predicted_view_features = self.g2f_module(gaussian_xyz, pred_color, pred_gs, pred_occ)
-            target_view_features = {
-                view: self.feature_extractor.extract_global_features(img.unsqueeze(0) if img.dim() == 3 else img)
-                for view, img in x['multiview_images'].items()
-            }
+            target_images_batch = []
+            view_order = []
+            
+            for view in self.vf_loss_criterion.views:
+                img_key = f'{view}_image'
+                if img_key in x:
+                    target_images_batch.append(x[img_key])
+                    view_order.append(view)
+            
+            if target_images_batch:
+                stacked_images = torch.cat(target_images_batch, dim=0)
+                
+                extracted_features = self.feature_extractor(stacked_images)
+                
+                target_view_features = {
+                    view: extracted_features[i].unsqueeze(0) for i, view in enumerate(view_order)
+                }
+            else:
+                target_view_features = {}
             vf_loss_details = self.vf_loss_criterion(predicted_view_features, target_view_features)
             vf_loss = vf_loss_details.get('vf_loss', torch.tensor(0.0, device=self.device))
             
-            # 将 VF Loss 添加到总损失
             total_loss += self.vf_loss_weight * vf_loss
-            loss_dict['loss'] = total_loss # 更新总损失
+            loss_dict['loss'] = total_loss
 
-            # 记录所有视觉对齐相关的损失
             loss_dict.update({
                 "vf_loss": vf_loss,
                 "vf_cosine": vf_loss_details.get('avg_cosine_loss', 0),
@@ -194,11 +194,8 @@ class CombinedModel(pl.LightningModule):
             latent, cond=cond
         )
 
-        loss_dict = {
-            "total": diff_loss,
-            "diff100": diff_100_loss,
-            "diff1000": diff_1000_loss
-        }
-        
-        self.log_dict(loss_dict, prog_bar=True, enable_graph=False)
+        self.log("diff_total", diff_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log("diff_100", diff_100_loss, on_step=True, on_epoch=True, prog_bar=False, logger=True, sync_dist=True)
+        self.log("diff_1000", diff_1000_loss, on_step=True, on_epoch=False, prog_bar=False, logger=True, sync_dist=True)
+
         return diff_loss

@@ -15,53 +15,38 @@ from pathlib import Path
 
 from models.combine_model import CombinedModel
 from dataloader.gaussian_loader import GaussianLoader
-from dataloader.multiview_loader import MultiViewGaussianLoader
+from dataloader.gs_dataloader import MultiViewGaussianDataset
 from utils.evaluate_utils import evaluate, pointcloud
 from convert import convert
-from utils.image_utils import MultiViewImageHandler
-
-
-class TestDataLoader:
-    def __init__(self, data_root, enable_vavae=False, multiview_specs=None):
-        if enable_vavae:
-            self.dataset = MultiViewGaussianLoader(
-                data_root=data_root,
-                multiview_specs=multiview_specs,
-                enable_multiview=True
-            )
-        else:
-            self.dataset = GaussianLoader(data_root)
-    
-    def __len__(self):
-        return len(self.dataset)
-    
-    def __getitem__(self, idx):
-        return self.dataset[idx]
 
 
 @torch.no_grad()
 def test_modulations():
-    vavae_specs = specs.get("VAVAESpecs", {})
-    enable_vavae = vavae_specs.get("enable", False)
+    va_specs = specs.get("VisualAlignmentSpecs", {})
+    enable_va = va_specs.get("enable", False)
     
-    # 根据VAVAE状态选择不同的数据加载器
-    if enable_vavae:
-        test_dataset = MultiViewGaussianLoader(
-            data_root=specs["Data_path"],
-            multiview_specs=vavae_specs.get("multiview", {}),
-            enable_multiview=True
+    if enable_va:
+        print("Visual Alignment mode enabled. Using MultiViewGaussianDataset for testing.")
+        data_path = specs["Data_path"]
+        test_dataset = MultiViewGaussianDataset(
+            gaussian_data_path=data_path["Data_path"],
+            image_data_path=data_path["Data_path"],
+            cache_path=os.path.join(args.exp_dir, "test_dataset_cache.pkl")
         )
-        image_handler = MultiViewImageHandler(vavae_specs.get("multiview", {}))
     else:
+        print("Standard mode enabled. Using GaussianLoader for testing.")
         test_dataset = GaussianLoader(specs["Data_path"])
     
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=1, num_workers=4)
 
     ckpt = "{}.ckpt".format(args.resume) if args.resume=='last' else "epoch={}.ckpt".format(args.resume)
-    resume = os.path.join(args.exp_dir, ckpt)
+    model_dir = os.path.join(args.exp_dir, 'visual_alignment' if enable_va == 'modulation' else 'standard_vae')
+    resume = os.path.join(model_dir, ckpt)
+
+    print(f"Loading modulation checkpoint from: {resume}")
     model = CombinedModel.load_from_checkpoint(resume, specs=specs).cuda().eval()
     
-    output_suffix = "vavae" if enable_vavae else "standard_vae"
+    output_suffix = "visual_alignment" if enable_va else "standard_vae"
     latent_dir = os.path.join(args.exp_dir, output_suffix, "modulations")
     os.makedirs(latent_dir, exist_ok=True)
 
@@ -78,21 +63,30 @@ def test_modulations():
             os.makedirs(outdir, exist_ok=True)
             np.savetxt(os.path.join(outdir, "latent.txt"), latent.cpu().numpy())
     
-    print(f"✅ Completed! Saved to {latent_dir}")
+    print(f"Completed! Saved to {latent_dir}")
 
 
 def test_generation():
     print("=== Testing Generation (Diffusion) ===")
+
+    modulation_ckpt_path = specs.get("modulation_ckpt_path")
+    diffusion_ckpt_path = specs.get("diffusion_ckpt_path")
+
+    if not modulation_ckpt_path or not diffusion_ckpt_path:
+        raise ValueError("specs.json must contain 'modulation_ckpt_path' and 'diffusion_ckpt_path' for generation testing.")
     
-    vavae_specs = specs.get("VAVAESpecs", {})
-    enable_vavae = vavae_specs.get("enable", False)
-    vavae_suffix = "vavae" if enable_vavae else "standard_vae"
-    model_subdir = os.path.join(args.exp_dir, vavae_suffix)
+    print(f"Loading VAE from: {modulation_ckpt_path}")
+    print(f"Loading Diffusion from: {diffusion_ckpt_path}")
+
+    va_specs = specs.get("VisualAlignmentSpecs", {})
+    enable_va = va_specs.get("enable", False)
+    va_suffix = "va" if enable_va else "standard_vae"
+    model_subdir = os.path.join(args.exp_dir, va_suffix)
     
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        model = CombinedModel.load_from_checkpoint(specs["modulation_ckpt_path"], specs=specs, strict=False) 
-        ckpt = torch.load(specs["diffusion_ckpt_path"])
+        model = CombinedModel.load_from_checkpoint(modulation_ckpt_path, specs=specs, strict=False) 
+        ckpt = torch.load(diffusion_ckpt_path)
         new_state_dict = {}
         for k,v in ckpt['state_dict'].items():
             new_key = k.replace("diffusion_model.", "")
@@ -101,16 +95,19 @@ def test_generation():
         model.diffusion_model.load_state_dict(new_state_dict)
         model = model.cuda().eval()
 
+    output_dir = os.path.join(args.exp_dir, "generated_samples")
+    os.makedirs(output_dir, exist_ok=True) 
+    print(f"Generated samples will be saved to: {output_dir}")
+
     idx = 0
     for e in range(args.epoches):
         samples = model.diffusion_model.generate_unconditional(args.num_samples)
         plane_features = model.vae_model.decode(samples)
-        output_dir = "/media/guest1/WD6TB/WD6TB/Andy/Datasets/lightdiffgsdata/4/0/2/generate"
-        os.makedirs(output_dir, exist_ok=True) 
+        
         for i in range(len(plane_features)):
             plane_feature = plane_features[i].unsqueeze(0)
             with torch.no_grad():
-                print('create points fast')
+                print(f'Generating sample {idx+1}...')
                 new_pc = pointcloud.create_pc_fast(model.gaussian_model, plane_feature, N=1024, max_batch=2**20, from_plane_features=True)
             new_pc_optimizer = pointcloud.pc_optimizer(model.gaussian_model, plane_feature.detach(), new_pc.clone().detach().cuda())            
             with torch.no_grad():
@@ -124,95 +121,95 @@ def test_generation():
                 gaussian[:,51] = 2.9444
                 gaussian[:,52:55] = 0.9 * torch.log(pred_gs[0,:,0:3])
                 gaussian[:,55:59] = pred_gs[0,:,3:7]
-                convert(gaussian.detach().cpu().numpy(), f"./generate/gaussian_{idx}.ply")
+                output_ply_path = os.path.join(output_dir, f"gaussian_{idx}.ply")
+                convert(gaussian.detach().cpu().numpy(), output_ply_path)
                 idx = idx + 1
 
 
 def main():
     print("=" * 80)
-    print("🧪 LightDiffGS Testing Pipeline")
+    print("🧪 DiffVAGS Testing Pipeline")
     print("=" * 80)
-    print(f"实验描述: {specs.get('Description', 'No Description')}")
-    print(f"训练任务: {specs.get('training_task', 'Unknown')}")
-    print(f"数据路径: {specs.get('Data_path', 'Not specified')}")
-    print(f"实验目录: {args.exp_dir}")
-    print(f"恢复节点: {args.resume}")
+    print(f"Experiment description: {specs.get('Description', 'No Description')}")
+    print(f"Training task: {specs.get('training_task', 'Unknown')}")
+    print(f"Data path: {specs.get('Data_path', 'Not specified')}")
+    print(f"Experiment directory: {args.exp_dir}")
+    print(f"Resume checkpoint: {args.resume}")
+
+    va_specs = specs.get("VisualAlignmentSpecs", {})
+    enable_va = va_specs.get("enable", False)
+    print(f"Visual Alignment status: {enable_va}")
     
-    vavae_specs = specs.get("VAVAESpecs", {})
-    enable_vavae = vavae_specs.get("enable", False)
-    print(f"VAVAE 启用状态: {enable_vavae}")
-    
-    if enable_vavae:
-        multiview_specs = vavae_specs.get("multiview", {})
-        print(f"多视角视图数: {multiview_specs.get('num_views', 12)}")
-        print(f"选择策略: {multiview_specs.get('selection_strategy', 'random')}")
-    
+    if enable_va:
+        multiview_specs = va_specs
+        print(f"Number of views: {multiview_specs.get('num_views', 'N/A')}")
+
     print("=" * 80)
     
     task = specs.get('training_task', 'modulation')
     
     if task == 'modulation':
-        print("🔧 Running modulation testing (latent extraction)")
+        print("Running modulation testing (latent extraction)")
         test_modulations()
         
     elif task == 'combined':
-        print("🎨 Running combined testing (generation)")
+        print("Running combined testing (generation)")
         test_generation()
         
     elif task == 'diffusion':
-        print("🌊 Running diffusion testing (generation only)")
+        print("Running diffusion testing (generation only)")
         test_generation()
         
     else:
         raise ValueError(f"Unknown training task: {task}")
     
-    print("\n🎉 Testing completed!")
+    print("\nTesting completed!")
 
 
 if __name__ == "__main__":
     import argparse
 
-    arg_parser = argparse.ArgumentParser(description="LightDiffGS Testing Script")
+    arg_parser = argparse.ArgumentParser(description="DiffVAGS Testing Script")
     
     arg_parser.add_argument(
         "--exp_dir", "-e", required=True,
-        help="实验目录，应包含specs.json配置文件"
+        help="Experiment directory containing specs.json and checkpoints (required)"
     )
     
     arg_parser.add_argument(
         "--resume", "-r", default="last", 
-        help="要测试的检查点: 整数值、'last'等 (默认: 'last')"
+        help="Checkpoint to resume from: integer value, 'last', etc. (default: 'last')"
     )
     
     arg_parser.add_argument(
         "--num_samples", "-n", default=5, type=int, 
-        help="生成和重建的样本数 (默认: 5)"
+        help="Number of samples to generate and reconstruct (default: 5)"
     )
     
     arg_parser.add_argument(
         "--epoches", default=100, type=int, 
-        help="生成和重建的轮数 (默认: 100)"
+        help="Number of epochs to run for generation and reconstruction testing (default: 100)"
     )
     
     arg_parser.add_argument(
         "--filter", default=False, action="store_true",
-        help="条件采样时是否过滤"
+        help="Whether to filter during conditional sampling"
     )
 
     args = arg_parser.parse_args()
     
     if not os.path.exists(args.exp_dir):
-        raise FileNotFoundError(f"❌ 实验目录不存在: {args.exp_dir}")
+        raise FileNotFoundError(f"No experiment path: {args.exp_dir}")
     
     specs_file = os.path.join(args.exp_dir, "specs.json")
     if not os.path.exists(specs_file):
-        raise FileNotFoundError(f"❌ 配置文件不存在: {specs_file}")
-    
+        raise FileNotFoundError(f"No specs file: {specs_file}")
+
     try:
         with open(specs_file, 'r') as f:
             specs = json.load(f)
     except json.JSONDecodeError as e:
-        raise ValueError(f"❌ 配置文件格式错误: {e}")
+        raise ValueError(f"Config file format error: {e}")
     
     warnings.simplefilter("ignore", category=UserWarning)
     warnings.simplefilter("ignore", category=FutureWarning)

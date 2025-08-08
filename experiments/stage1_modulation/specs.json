@@ -1,12 +1,14 @@
 {
-    "Description": "LightDiffGS: Stage 1 - Modulation Training with VAVAE",
+    "Description": "DiffVAGS: Stage 1 - Modulation Training with VAVAE",
     
     "training_task": "modulation",
-    "Data_path": "/media/guest1/WD6TB/WD6TB/Andy/Datasets/lightdiffgsdata/03001627/training_data",
+    "Data_path": "/project/owlicdc/andy/dataset/03001627/media/andywu/WD6TB/WD6TB/Andy/Datasets/lightdiffgsdata/03001627/convert_data",
     
     "num_epochs": 1000,
     "log_freq": 100,
     "kld_weight": 1e-5,
+
+    "modulation_ckpt_path": "/home/dwubf/workplace/DiffVAGS/experiments/stage1_modulation/standard_vae/last.ckpt",
     
     "learning_rates": {
         "sdf_lr": 1e-4
@@ -20,20 +22,19 @@
     },
 
     "VisualAlignmentSpecs": {
-        "enable": true,
+        "enable": false,
         "vf_loss_weight": 0.1,
         "cosine_weight": 0.5,
         "distance_weight": 0.5,
         "views_to_load": ["front.png", "side.png", "top.png"],
         "image_size": 224,
         "images_folder": "images",
-        "g2f_checkpoint_path": "/path/to/your/g2f_net/best_model.pth",
-        "adapter_weights_path": "/path/to/your/g2f_net/adapter_weights.pth"
+        "g2f_checkpoint_path": "/path/to/your/g2f_net/best_model.pth"
     },
     
     "TrainerSpecs": {
-        "batch_size": 1,
-        "num_workers": 1,
-        "precision": 32
+        "batch_size": 4,
+        "num_workers": 8,
+        "precision": 16
     }
 }

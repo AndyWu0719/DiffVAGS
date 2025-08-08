@@ -8,7 +8,7 @@ Tensor = TypeVar('torch.tensor')
 
 # Gaussian VAE Encoder
 class GaussianEncoder(nn.Module):
-    num_iterations = 0
+    # num_iterations = 0
 
     def __init__(self, 
                  in_channels: int,
@@ -140,7 +140,7 @@ class GaussianEncoder(nn.Module):
     
     def loss_function(self, *args, **kwargs) -> dict:
         # Placeholder for loss function logic
-        self.num_iterations += 1
+        # self.num_iterations += 1
         
         kld_weight = kwargs.get('M_N', 1.0)  # minibatch weight
         
@@ -149,7 +149,8 @@ class GaussianEncoder(nn.Module):
         vae_loss = kld_weight * kl_loss
         
         return {
-            'VAEloss': vae_loss
+            'VAEloss': vae_loss,
+            'kld_unweighted': kl_loss
         }
         
     def _compute_kl_loss(self, mu: Tensor, logvar: Tensor) -> Tensor:

@@ -1,12 +1,12 @@
 {
-    "Description": "LightDiffGS: Stage 2 - Diffusion Model Training",
+    "Description": "DiffVAGS: Stage 2 - Diffusion Model Training",
     
     "training_task": "diffusion",
-    "Data_path": "/home/andywu/Documents/dongjun/NewGSDiffusion/experiments/stage1_modulation/vavae/modulations",
+    "Data_path": "/home/dwubf/workplace/DiffVAGS/experiments/stage1_modulation/standard_vae/modulations",
     
     "num_epochs": 50001,
     "log_freq": 2500,
-    "enable_vavae": true,
+    "diffusion_ckpt_path": "/path/to/your/diffusion_model.ckpt",
     
     "learning_rates": {
         "diff_lr": 1e-5
@@ -27,8 +27,8 @@
     },
     
     "TrainerSpecs": {
-        "batch_size": 1,
-        "num_workers": 1,
-        "precision": 32
+        "batch_size": 4,
+        "num_workers": 8,
+        "precision": 16
     }
   }

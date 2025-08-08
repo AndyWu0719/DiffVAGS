@@ -11,7 +11,7 @@ import warnings
 from models.combine_model import CombinedModel
 from dataloader.modulation_loader import ModulationLoader
 from dataloader.gaussian_loader import GaussianLoader
-from dataloader.multiview_loader import MultiViewGaussianLoader
+from dataloader.gs_dataloader import MultiViewGaussianDataset
 from utils.diff_utils import save_code_to_conf
 
 def train():
@@ -27,10 +27,12 @@ def train():
         enable_visual_alignment = va_specs.get("enable", False)
         
         if enable_visual_alignment:
-            print("Visual Alignment mode enabled. Using MultiViewGaussianLoader.")
-            train_dataset = MultiViewGaussianLoader(
-                data_root=data_path,
-                multiview_specs=va_specs # 直接传递整个VA配置节
+            print("Visual Alignment mode enabled. Using MultiViewGaussianDataset.")
+            train_dataset = MultiViewGaussianDataset(
+                gaussian_data_path=data_path,
+                image_data_path=data_path,
+                # view_mapping 和 cache_path 可以使用默认值或从 specs.json 读取
+                cache_path=os.path.join(args.exp_dir, "dataset_cache.pkl")
             )
             model_type = "visual_alignment"
         else:
@@ -47,13 +49,16 @@ def train():
     precision = args.precision if args.precision is not None else trainer_specs.get("precision", 32)
 
     print(f"Effective training params: batch_size={batch_size}, workers={num_workers}, precision={precision}")
-    
+
+    # is_ddp = specs.get("TrainerSpecs", {}).get("strategy") == 'ddp'
+    # shuffle_dataloader = not is_ddp
+
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=batch_size, 
         num_workers=num_workers,
         drop_last=True, 
-        shuffle=True, 
+        shuffle=False, 
         pin_memory=True, 
         persistent_workers=True if num_workers > 0 else False
     )
@@ -148,7 +153,7 @@ if __name__ == "__main__":
         specs = json.load(f)
     
     print("=" * 50)
-    print(f"{specs.get('Description', 'LightDiffGS Training')}")
+    print(f"{specs.get('Description', 'DiffVAGS Training')}")
     print(f"Task: {specs.get('training_task', 'unknown')}")
     print(f"Data: {specs.get('Data_path', 'not specified')}")
     print(f"Experiment dir: {args.exp_dir}")

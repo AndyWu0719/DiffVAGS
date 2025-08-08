@@ -1,27 +1,48 @@
 #!/usr/bin/env python3
 import argparse
+import torch
+import torch.distributed as dist
+import os
 from g2fnet import train_model
 
+def setup_distributed():
+    dist.init_process_group(backend='nccl')
+    local_rank = int(os.environ['LOCAL_RANK'])
+    torch.cuda.set_device(local_rank)
+    return local_rank
+
 def main():
-    parser = argparse.ArgumentParser(description='训练多视角特征预测模型')
-    parser.add_argument('--gaussian_path', type=str, required=False, help='高斯数据路径', default='/media/andywu/WD6TB/WD6TB/Andy/Datasets/lightdiffgsdata/03001627/convert_data')
-    parser.add_argument('--image_path', type=str, required=False, help='图像数据路径', default='/media/andywu/WD6TB/WD6TB/Andy/Datasets/lightdiffgsdata/03001627/training_data')
-    parser.add_argument('--epochs', type=int, default=100, help='训练轮数')
-    parser.add_argument('--batch_size', type=int, default=8, help='批大小')
-    parser.add_argument('--lr', type=float, default=1e-4, help='学习率')
-    
+    parser = argparse.ArgumentParser(description='G2FNet Training Script')
+    parser.add_argument('--gaussian_path', type=str, required=False, help='Path to the Gaussian data', default='/media/andywu/WD6TB/WD6TB/Andy/Datasets/lightdiffgsdata/03001627/convert_data')
+    parser.add_argument('--image_path', type=str, required=False, help='Path to the image data', default='/media/andywu/WD6TB/WD6TB/Andy/Datasets/lightdiffgsdata/03001627/training_data')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for data loading')
+    parser.add_argument('--resume_checkpoint', type=str, default=None, help='Resume training from the specified best_model.pth file')
+
     args = parser.parse_args()
     
-    # 设置全局参数（在实际应用中应传递到训练函数）
-    global GAUSSIAN_PATH, IMAGE_PATH
-    GAUSSIAN_PATH = args.gaussian_path
-    IMAGE_PATH = args.image_path
+    local_rank = setup_distributed()
     
-    print(f"开始训练: 高斯数据={args.gaussian_path}, 图像数据={args.image_path}")
-    print(f"参数: epochs={args.epochs}, batch_size={args.batch_size}, lr={args.lr}")
-    
-    train_model()
+    if local_rank == 0:
+        print(f"Start distributed training: Gaussian data={args.gaussian_path}, Image data={args.image_path}")
+        print(f"Parameters: epochs={args.epochs}, batch_size(per GPU)={args.batch_size}, lr={args.lr}")
+        if args.resume_checkpoint:
+            print(f"Resume training from checkpoint: {args.resume_checkpoint}")
+
+    train_model(
+        local_rank=local_rank,
+        gaussian_path=args.gaussian_path,
+        image_path=args.image_path,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        num_workers=args.num_workers,
+        resume_checkpoint=args.resume_checkpoint
+    )
+
+    dist.destroy_process_group()
 
 if __name__ == "__main__":
     main()
-
